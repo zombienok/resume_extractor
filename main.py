@@ -94,7 +94,7 @@ def main():
         # Skill frequency summary
         f.write("\n" + "=" * 60 + "\n")
         f.write("TOP SKILLS ACROSS ALL RESUMES\n")
-        f.write("=" * 60 + "\n")
+        f.write("=" * 59 + "\n")
         freq = processor.get_skill_frequency()
         for i, (skill, count) in enumerate(list(freq.items())[:15], 1):
             f.write(f"{i:2d}. {skill:30s} ({count} resumes)\n")
