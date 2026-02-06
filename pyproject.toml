@@ -1,0 +1,15 @@
+[project]
+name = "resume-extractor"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "deep-translator>=1.11.4",
+    "langdetect>=1.0.9",
+    "nltk>=3.9.2",
+    "numpy>=2.4.2",
+    "pip>=26.0.1",
+    "sentence-transformers>=5.2.2",
+    "spacy>=3.8.11",
+]
