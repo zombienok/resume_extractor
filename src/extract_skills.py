@@ -4,7 +4,6 @@ from typing import List, Tuple, Set
 from sentence_transformers import SentenceTransformer, util
 import logging
 import time
-from translator import translate_to_english, detect_language
 
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -31,39 +30,7 @@ def get_model():
         _model = SentenceTransformer('all-MiniLM-L6-v2')
     return _model
 
-# Sample skills database
-SKILLS_DB = [
-    "Python", "TensorFlow", "PyTorch", "SQL", "Docker", "Kubernetes",
-    "Machine Learning", "Deep Learning", "NLP", "Computer Vision",
-    "React", "JavaScript", "AWS", "Azure", "Project Management"
-]
 
-def translation_pipeline(skills = SKILLS_DB) -> Set[str]:
-    translated_skills = set()
-    count = 0
-    i = 0
-    to_translate = []
-    lenght = 0
-    while count < len(skills):
-        detection = detect_language(skills[i])
-        if detection:
-            to_translate += [skills[i]]
-            lenght += len(skills[i])
-        elif not detection:
-            translated_skills.add(skills[i])
-        if lenght >= 100 or (to_translate and count == len(skills)-1):
-            lenght = 0
-            translated_chunk, _ = translate_to_english(" ; ".join(i for i in to_translate))
-            for skill in translated_chunk.split(" ; "):
-                translated_skills.add(skill.strip())
-            to_translate = []
-        i += 1
-        count += 1
-        print(translated_skills)
-    return translated_skills
-
-TRANSLATED_SKILL_DB = list(translation_pipeline())
-print(TRANSLATED_SKILL_DB)
 
 # Precompute skill embeddings once
 _SKILL_EMBEDDINGS = None
@@ -99,7 +66,7 @@ def extract_skill_chunks(text: str) -> List[str]:
     return list(chunks)
 
 
-def match_skills(resume_text: str, skills_db: List[str] = TRANSLATED_SKILL_DB, threshold: float = 0.55) -> Set[Tuple[str, float]]:
+def match_skills(resume_text: str, skills_db: List[str], threshold: float = 0.55) -> Set[Tuple[str, float]]:
     """
     Match skills by:
     1. Extracting skill-like chunks from resume
@@ -135,18 +102,18 @@ def match_skills(resume_text: str, skills_db: List[str] = TRANSLATED_SKILL_DB, t
 
     
 
-# Example usage
-if __name__ == "__main__":
-    start_time = time.time()
-    resume = """
-    Senior Python Developer with 5+ years of experience in machine learning, deep learning, and NLP.
-    """
-    need_to_translate = detect_language(resume)
-    if need_to_translate:
-        logging.info("🌐 Detected non-English resume. Translating to English for skill extraction...")
-        translated_resume, was_translated = translate_to_english(resume, detect_language(resume))
-    results = match_skills(translated_resume) if translated_resume else match_skills(resume)
-    logging.info(f"Matching took {time.time() - start_time:.2f} seconds")
-    print("Top skill matches:")
-    for skill, score in results:
-        print(f"  {skill}: {score:.3f}")
+# # Example usage
+# if __name__ == "__main__":
+#     start_time = time.time()
+#     resume = """
+#     Senior Python Developer with 5+ years of experience in machine learning, deep learning, and NLP.
+#     """
+#     need_to_translate = detect_language(resume)
+#     if need_to_translate:
+#         logging.info("🌐 Detected non-English resume. Translating to English for skill extraction...")
+#         translated_resume, was_translated = translate_to_english(resume, detect_language(resume))
+#     results = match_skills(translated_resume) if translated_resume else match_skills(resume)
+#     logging.info(f"Matching took {time.time() - start_time:.2f} seconds")
+#     print("Top skill matches:")
+#     for skill, score in results:
+#         print(f"  {skill}: {score:.3f}")
