@@ -1,84 +1,108 @@
-from src.parser import extract_text
-from src.extract_skills import match_skills
-from src.translator import detect_language, translate_to_english
-import logging 
+#!/usr/bin/env python3
+"""Batch resume skill extractor with auto-translation."""
+import argparse
+import logging
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+from src.extract_skills import get_default_matcher, SkillExtractor
+from src.precompute import BatchResumeProcessor, extract_text
+from src.translator import Translator
+
+
 import time
-from os import listdir, path
-from os.path import isfile
-from typing import Set, Tuple, List
 
 
-def translation_pipeline(skills) -> Set[str]:
-    translated_skills = set()
-    count = 0
-    i = 0
-    to_translate = []
-    lenght = 0
-    while count < len(skills):
-        detection = detect_language(skills[i])
-        if detection:
-            to_translate += [skills[i]]
-            lenght += len(skills[i])
-        elif not detection:
-            translated_skills.add(skills[i])
-        if lenght >= 100 or (to_translate and count == len(skills)-1):
-            lenght = 0
-            translated_chunk, _ = translate_to_english(" ; ".join(i for i in to_translate))
-            for skill in translated_chunk.split(" ; "):
-                translated_skills.add(skill.strip())
-            to_translate = []
-        i += 1
-        count += 1
-        print(translated_skills)
-    return translated_skills
-
+# Patch processor to accept pre-translated text (avoids re-extraction)
+def add_resume_from_text(self, resume_id: str, text: str):
+    if not text.strip():
+        logging.warning(f"Skipping empty resume: {resume_id}")
+        return
+    self.resume_texts[resume_id] = text
+    chunks = SkillExtractor.extract_chunks(text)
+    if chunks:
+        self.resume_chunks[resume_id] = chunks
+        for chunk in chunks:
+            self.all_unique_chunks.add(chunk)
+            self.chunk_to_resumes[chunk].add(resume_id)
+    else:
+        logging.debug(f"No skill chunks found in {resume_id}")
 
 def main():
-    start_time = time.time()
-    TRANSLATED_SKILL_DB = list(translation_pipeline(skills=SKILLS_DB))
-    print(TRANSLATED_SKILL_DB)
-    PATH = r"C:/Users/sanya/Desktop/pet projects/job matcher/resume_extractor/Resumes"
-    results = []
-    for file in listdir(PATH):
-        if isfile(path.join(PATH, file)):
-            with open(f"{PATH}/{file}", "rb") as f:
-                text = extract_text(f.read(), file)
-                need_to_translate = detect_language(text)
-                translated_resume = None
-                if need_to_translate:
-                    logging.info("🌐 Detected non-English resume. Translating to English for skill extraction...")
-                    translated_resume, was_translated = translate_to_english(text, detect_language(text))
-                results = match_skills(translated_resume, TRANSLATED_SKILL_DB) if translated_resume else match_skills(text, TRANSLATED_SKILL_DB)
-                with open(f"{PATH}/results.txt", "a", encoding="utf-8") as res_file:
-                    res_file.write(f"Resume: {file}\n")
-                    res_file.write("Top skill matches:\n")
-                    for skill, score in results:
-                        res_file.write(f"  {skill}: {score:.3f}\n")
-                logging.info(f"Processed '{file}' with {len(results)} matched skills.")
-    logging.info(f"All resumes processed in {time.time() - start_time:.2f} seconds.")
+    parser = argparse.ArgumentParser(description="Extract skills from resumes in a folder")
+    parser.add_argument("folder", type=str, help="Path to folder containing resumes (.pdf/.docx/.txt)")
+    parser.add_argument("-o", "--output", default="results.txt", help="Output file (default: results.txt)")
+    args = parser.parse_args()
 
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    translator = Translator()
+    matcher = get_default_matcher()
+    
+    # Initialize batch processor with default skills
+    processor = BatchResumeProcessor(
+        skills_db=matcher.skills_db,
+        threshold=matcher.threshold,
+        cache_dir=".skill_cache"
+    )
+    processor.add_resume_from_text = lambda rid, txt: add_resume_from_text(processor, rid, txt)
+
+    # Process all resumes: extract → translate → add
+    folder = Path(args.folder)
+    for path in folder.glob("*"):
+        if path.suffix.lower() not in (".pdf", ".docx", ".txt"):
+            continue
+        
+        try:
+            # Extract raw text
+            with open(path, "rb") as f:
+                raw_text = extract_text(f.read(), path.name)
+            
+            # Translate if non-English
+            lang = translator.detect_language(raw_text[:500])  # Sample first 500 chars
+            if lang and lang != "en":
+                logging.info(f"🌍 Translating {path.name} (detected: {lang})")
+                raw_text, _ = translator.translate(raw_text)
+            
+            processor.add_resume_from_text(path.stem, raw_text)
+            logging.info(f"✓ Processed: {path.name}")
+        
+        except Exception as e:
+            logging.error(f"❌ Failed {path.name}: {e}")
+
+    if not processor.resume_chunks:
+        logging.error("No valid resumes processed. Exiting.")
+        return
+
+    # SINGLE PASS: encode all unique chunks across all resumes
+    processor.encode_chunks(use_cache=True, batch_size=32)
+    
+    # Match against precomputed skill embeddings (no re-encoding)
+    results: Dict[str, List[Tuple[str, float]]] = processor.match_all_resumes(top_k=10)
+
+    # Write results
+    with open(args.output, "w", encoding="utf-8") as f:
+        f.write("RESUME SKILL MATCHING RESULTS\n")
+        f.write("=" * 60 + "\n\n")
+        for rid, skills in sorted(results.items()):
+            f.write(f"📄 {rid}\n")
+            if not skills:
+                f.write("  (no skills matched above threshold)\n")
+            for skill, score in skills:
+                f.write(f"  • {skill}: {score:.3f}\n")
+            f.write("\n")
+        
+        # Skill frequency summary
+        f.write("\n" + "=" * 60 + "\n")
+        f.write("TOP SKILLS ACROSS ALL RESUMES\n")
+        f.write("=" * 60 + "\n")
+        freq = processor.get_skill_frequency()
+        for i, (skill, count) in enumerate(list(freq.items())[:15], 1):
+            f.write(f"{i:2d}. {skill:30s} ({count} resumes)\n")
+    
+    logging.info(f"\n✓ Results written to {args.output}")
+    logging.info(f"  Processed {len(results)} resumes with {len(processor.all_unique_chunks)} unique chunks")
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
-    logging.info("Starting resume processing pipeline...")
-
-    # Sample skills database
-    SKILLS_DB = [
-        "Python", "JavaScript", "JS", "TypeScript", "TS", "Java", "C++", "C#", "C", "Go", "Golang", "Rust", "Kotlin", "Swift", "Ruby", "PHP", "Scala", "R", "SQL", "PL/SQL", "Bash", "Shell", "PowerShell", "MATLAB", "Julia", "Dart", "Objective-C", "Perl", "Haskell", "Lua", "Assembly", "x86", "ARM",
-        "React", "Vue.js", "Vue", "Angular", "Svelte", "Next.js", "Nuxt.js", "HTML5", "CSS3", "Tailwind CSS", "Bootstrap", "Sass", "SCSS", "LESS", "Webpack", "Vite", "Babel", "npm", "yarn", "pnpm", "jQuery", "Three.js", "D3.js", "WebGL", "WebAssembly", "Wasm",
-        "Node.js", "Express.js", "Django", "Flask", "FastAPI", "Spring Boot", ".NET Core", "ASP.NET", "Ruby on Rails", "Laravel", "Phoenix", "Elixir", "GraphQL", "REST", "gRPC", "SOAP", "OpenAPI", "Swagger", "Postman", "Apollo", "tRPC",
-        "PostgreSQL", "Postgres", "MySQL", "MongoDB", "Redis", "SQLite", "Oracle", "SQL Server", "Cassandra", "DynamoDB", "Firebase", "Firestore", "Elasticsearch", "Neo4j", "ClickHouse", "TimescaleDB", "MariaDB", "CouchDB", "BigQuery", "Snowflake", "Redshift",
-        "AWS", "Azure", "Google Cloud", "GCP", "Docker", "Kubernetes", "K8s", "Terraform", "Ansible", "Jenkins", "GitHub Actions", "GitLab CI/CD", "CircleCI", "ArgoCD", "Helm", "Prometheus", "Grafana", "Datadog", "New Relic", "Splunk", "Nginx", "Apache", "HAProxy", "Istio", "Envoy", "Linux", "Ubuntu", "CentOS", "AWS Lambda", "EC2", "S3", "RDS", "ECS", "EKS", "GKE",
-        "Apache Spark", "Kafka", "Airflow", "dbt", "Flink", "Beam", "Luigi", "MLflow", "Kubeflow", "DVC", "Weights & Biases", "W&B", "Databricks", "Delta Lake", "Iceberg", "Hadoop", "Hive", "Presto", "Trino", "Metabase", "Tableau", "Power BI", "Looker", "Superset",
-        "PyTorch", "TensorFlow", "Keras", "Scikit-learn", "sklearn", "XGBoost", "LightGBM", "CatBoost", "Hugging Face", "Transformers", "LangChain", "LlamaIndex", "spaCy", "NLTK", "OpenCV", "YOLO", "Stable Diffusion", "Whisper", "Llama", "Mistral", "Gemma", "RAG", "fine-tuning", "prompt engineering", "Pinecone", "Weaviate", "Qdrant", "Chroma",
-        "React Native", "Flutter", "Xamarin", "Ionic", "Cordova",
-        "Selenium", "Cypress", "Playwright", "Jest", "PyTest", "JUnit", "TestNG", "Mocha", "Chai", "OWASP ZAP", "Burp Suite",
-        "Figma", "Sketch", "Adobe XD", "Photoshop", "Illustrator", "InVision", "Principle", "After Effects", "Blender", "Maya", "Unity", "Unreal Engine",
-        "Project Management", "Agile", "Scrum", "Kanban", "Jira", "Confluence", "Trello", "Asana", "Stakeholder Management", "Requirements Gathering", "Budgeting", "Forecasting", "Public Speaking", "Technical Writing", "Mentoring", "Cross-functional Collaboration", "Negotiation", "Conflict Resolution", "Change Management",
-        "FinTech", "HealthTech", "Cybersecurity", "NLP", "Computer Vision", "Reinforcement Learning", "Time Series Forecasting", "Recommendation Systems", "Search Engines", "Blockchain", "Web3", "Smart Contracts", "Solidity", "DeFi", "Quantitative Finance", "Bioinformatics",
-        "AWS Certified Solutions Architect", "Google Professional Cloud Architect", "Microsoft Azure Administrator", "CISSP", "CISM", "PMP", "Scrum Master", "CSM", "Kubernetes Administrator", "CKA"
-    ]
-
-
-
+    start_time = time.time()
     main()
+    logging.info(f"\n⏱️  Total execution time: {time.time() - start_time:.2f} seconds")
